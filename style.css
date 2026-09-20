@@ -7,7 +7,7 @@
 
   /* текст */
   --ink: #4A3E38;
-  --ink-dim: #A08D7F;
+  --ink-dim: #7A685C;      /* достаточно тёмный, чтобы мелкий текст читался при ярком свете */
 
   /* смысловые цвета */
   --blue: #4E86B0;        /* приход */
@@ -141,6 +141,12 @@ button {
 .w-3 { width: 10px; } .h-3 { height: 10px; }
 .w-7 { width: 28px; } .h-7 { height: 28px; }
 .w-24 { width: 96px; }
+.h-full { height: 100%; } /* без него заливка полосок прогресса имела нулевую высоту */
+
+/* переключатель «Месяц | Неделя» */
+.seg { display: flex; background: var(--bg-soft); border-radius: 14px; padding: 4px; }
+.seg button { flex: 1; min-height: 40px; padding: 8px; border-radius: 10px; font-size: 14px; font-weight: 500; color: var(--ink-dim); }
+.seg button.active { background: var(--bg-card); color: var(--ink); box-shadow: 0 1px 3px rgba(74,62,56,.12); }
 
 .p-3 { padding: 12px; } .p-4 { padding: 16px; } .p-5 { padding: 20px; }
 .px-2 { padding-left: 8px; padding-right: 8px; }

@@ -34,25 +34,84 @@ const DEFAULT_GOALS = [
   { id: "lips", name: "Губы", target: 20000, base: 0, color: BLUSH },
 ];
 
-const fmt = (n) => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(Math.round(n)) + " ₽";
-const fmtShort = (n) => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(Math.round(n));
+const SAVINGS_ID = "savings";
+
+// копейки показываем только если они есть: 450,50 ₽, а круглые суммы — как раньше
+const fmtNum = (n, frac) => new Intl.NumberFormat("ru-RU", { minimumFractionDigits: frac, maximumFractionDigits: frac }).format(n);
+const hasKopecks = (n) => Math.abs(n - Math.round(n)) > 0.004;
+const fmt = (n) => hasKopecks(n) ? fmtNum(n, 2) + " ₽" : fmtNum(Math.round(n), 0) + " ₽";
+const fmtRound = (n) => fmtNum(Math.round(n), 0) + " ₽"; // для анимации: чтобы копейки не мелькали
+const fmtShort = (n) => fmtNum(Math.round(n), 0);
+
+// принимает «450», «450,5», «1 500», «38 000,50», «1500 ₽» — так суммы и вводят с русской клавиатуры
+function parseAmount(v) {
+  const s = String(v).replace(/[\s  ]/g, "").replace(/(₽|руб\.?|р\.?)$/i, "").replace(",", ".");
+  if (!/^(\d+\.?\d*|\.\d+)$/.test(s)) return NaN;
+  return Math.round(Number(s) * 100) / 100;
+}
+function amountError(amt) {
+  if (!Number.isFinite(amt)) return "Введите сумму числом, например 1500 или 450,50.";
+  if (amt <= 0) return "Укажите сумму больше нуля.";
+  return null;
+}
+function plural(n, [one, few, many]) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
 
 function pad2(n) { return String(n).padStart(2, "0"); }
-function todayStr() {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
+function ymd(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+function parseYmd(s) { const [y, m, d] = String(s).slice(0, 10).split("-").map(Number); return new Date(y, m - 1, d); }
+function todayStr() { return ymd(new Date()); }
 function monthKey(dateStr) { return String(dateStr).slice(0, 7); }
 function monthLabel(key) {
   const [y, m] = key.split("-");
   const d = new Date(Number(y), Number(m) - 1, 1);
   return d.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
 }
-function prevMonthKey(key) {
-  const [y, m] = key.split("-").map(Number);
-  const d = new Date(y, m - 2, 1);
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+
+// ---------- периоды для обзора: месяц или неделя, 0 — текущий, -1 — прошлый и т.д. ----------
+function mondayOf(d) {
+  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  r.setDate(r.getDate() - ((r.getDay() + 6) % 7));
+  return r;
 }
+function weekRangeLabel(start, end) {
+  const dm = (d, month) => d.toLocaleDateString("ru-RU", { day: "numeric", month });
+  const sameMonth = start.getMonth() === end.getMonth();
+  const year = end.getFullYear() !== new Date().getFullYear() ? ` ${end.getFullYear()}` : "";
+  return `${sameMonth ? start.getDate() : dm(start, "short")} – ${dm(end, sameMonth ? "long" : "short")}${year}`;
+}
+function periodAt(mode, offset) {
+  const now = new Date();
+  if (mode === "week") {
+    const start = mondayOf(now);
+    start.setDate(start.getDate() + 7 * offset);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    return { start: ymd(start), end: ymd(end), label: weekRangeLabel(start, end) };
+  }
+  const start = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+  const end = new Date(start.getFullYear(), start.getMonth() + 1, 0);
+  const name = start.toLocaleDateString("ru-RU", { month: "long", year: "numeric" }).replace(/\s*г\.?$/, "");
+  return { start: ymd(start), end: ymd(end), label: name.charAt(0).toUpperCase() + name.slice(1) };
+}
+function offsetOf(mode, dateStr) {
+  const d = parseYmd(dateStr), now = new Date();
+  if (mode === "week") return Math.round((mondayOf(d) - mondayOf(now)) / (7 * 86400000));
+  return (d.getFullYear() - now.getFullYear()) * 12 + d.getMonth() - now.getMonth();
+}
+// листать можно от самой ранней записи до текущего периода (или до самой поздней, если есть записи «в будущем»)
+function periodBounds() {
+  const dates = state.transactions.map((t) => t.date).filter(Boolean);
+  if (!dates.length) return { min: 0, max: 0 };
+  const lo = dates.reduce((a, b) => (a < b ? a : b));
+  const hi = dates.reduce((a, b) => (a > b ? a : b));
+  return { min: Math.min(0, offsetOf(state.periodMode, lo)), max: Math.max(0, offsetOf(state.periodMode, hi)) };
+}
+function inRange(t, range) { return !range || (t.date >= range.start && t.date <= range.end); }
 function slug(s) {
   return "c_" + s.toLowerCase().trim().replace(/[^a-zа-я0-9]+/gi, "-").replace(/(^-|-$)/g, "") + "_" + Date.now().toString(36);
 }
@@ -106,6 +165,9 @@ const state = {
   addingCategory: false,
   newCatName: "",
   newCatColor: PALETTE[0],
+  periodMode: "month", // month | week
+  periodOffset: 0,     // 0 — текущий период, -1 — предыдущий
+  periodSlide: "",
 };
 
 function persistTx() { save("kfin:transactions", state.transactions); }
@@ -120,11 +182,18 @@ function goalById(id) {
 }
 
 // ---------- расчёты ----------
+// взнос в копилку — не трата: он считается отдельно («Отложено»), но с карты деньги уходят,
+// поэтому остаток = приход − потрачено − отложено
+const isSaved = (t) => t.kind === "expense" && t.categoryId === SAVINGS_ID;
 function totals(txs) {
   const list = txs || state.transactions;
-  const totalIncome = list.filter((t) => t.kind === "income").reduce((s, t) => s + t.amount, 0);
-  const totalExpense = list.filter((t) => t.kind === "expense").reduce((s, t) => s + t.amount, 0);
-  return { totalIncome, totalExpense, balance: totalIncome - totalExpense };
+  let totalIncome = 0, totalExpense = 0, totalSaved = 0;
+  for (const t of list) {
+    if (t.kind === "income") totalIncome += t.amount;
+    else if (isSaved(t)) totalSaved += t.amount;
+    else if (t.kind === "expense") totalExpense += t.amount;
+  }
+  return { totalIncome, totalExpense, totalSaved, balance: totalIncome - totalExpense - totalSaved };
 }
 function goalInfo(goal) {
   const deposited = state.transactions
@@ -142,23 +211,18 @@ function txByMonth(kindFilter) {
   const map = new Map();
   for (const t of state.transactions) {
     if (kindFilter && t.kind !== kindFilter) continue;
+    if (kindFilter === "expense" && isSaved(t)) continue; // взносы в копилку живут на вкладке «Копилки»
     const mk = monthKey(t.date);
     if (!map.has(mk)) map.set(mk, []);
     map.get(mk).push(t);
   }
   return [...map.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
 }
-function monthCompare() {
-  const cur = monthKey(todayStr());
-  const prev = prevMonthKey(cur);
-  const inMonth = (mk) => state.transactions.filter((t) => monthKey(t.date) === mk);
-  return { cur, prev, curT: totals(inMonth(cur)), prevT: totals(inMonth(prev)) };
-}
-function categoryBreakdown(monthFilter) {
+function categoryBreakdown(range) {
   const map = new Map();
   for (const t of state.transactions) {
-    if (t.kind !== "expense") continue;
-    if (monthFilter && monthKey(t.date) !== monthFilter) continue;
+    if (t.kind !== "expense" || isSaved(t)) continue;
+    if (!inRange(t, range)) continue;
     map.set(t.categoryId, (map.get(t.categoryId) || 0) + t.amount);
   }
   const rows = [...map.entries()].map(([id, sum]) => ({ cat: catById(id), sum }));
@@ -177,6 +241,7 @@ const ICONS = {
   save: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg>',
   load: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="m7 13 5-5 5 5"/><path d="M5 3h14"/></svg>',
   chevron: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
+  chevronL: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
   plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>',
 };
 
@@ -188,20 +253,24 @@ const TABS = [
 ];
 
 // ---------- действия ----------
+// в списке для новой траты не показываем убранные категории и «Копилку» (взносы — на вкладке «Копилки»)
+const hiddenCat = (c) => c.archived || c.id === SAVINGS_ID;
+
 function resetForm(kind) {
-  const cat = state.categories.find((c) => c.type === kind && !c.archived);
+  const cat = state.categories.find((c) => c.type === kind && !hiddenCat(c));
   state.form = { kind, categoryId: cat ? cat.id : "other", amount: "", note: "", date: todayStr() };
   state.editingId = null;
 }
 
 function submitTransaction(kind) {
-  const amt = Number(state.form.amount);
-  if (!amt || amt <= 0) { state.error = "Укажите сумму больше нуля."; render(); return; }
+  const amt = parseAmount(state.form.amount);
+  const problem = amountError(amt);
+  if (problem) { state.error = problem; render(); return; }
   state.error = null;
   let cat = catById(state.form.categoryId);
-  // убранная категория подходит только при правке старой записи, в новую трату — нет
-  if (!cat || cat.type !== kind || (cat.archived && !state.editingId)) {
-    cat = state.categories.find((c) => c.type === kind && !c.archived) || cat;
+  // скрытая категория подходит только при правке старой записи, в новую трату — нет
+  if (!cat || cat.type !== kind || (hiddenCat(cat) && !state.editingId)) {
+    cat = state.categories.find((c) => c.type === kind && !hiddenCat(c)) || cat;
   }
 
   if (state.editingId) {
@@ -214,6 +283,7 @@ function submitTransaction(kind) {
   }
   persistTx();
   resetForm(kind);
+  if (cat.id === SAVINGS_ID) state.tab = "savings"; // правили взнос в копилку — возвращаемся к копилкам
   render();
 }
 
@@ -230,7 +300,9 @@ function startEdit(id) {
 }
 
 function cancelEdit() {
+  const wasSaving = state.form.categoryId === SAVINGS_ID;
   resetForm(state.form.kind);
+  if (wasSaving) state.tab = "savings";
   render();
 }
 
@@ -242,8 +314,9 @@ function deleteTransaction(id) {
 }
 
 function addSavingsDeposit() {
-  const amt = Number(state.savingsAmount);
-  if (!amt || amt <= 0) { state.error = "Укажите сумму больше нуля."; render(); return; }
+  const amt = parseAmount(state.savingsAmount);
+  const problem = amountError(amt);
+  if (problem) { state.error = problem; render(); return; }
   const goal = goalById(state.activeGoalId);
   state.error = null;
   state.transactions = [{ id: uid(), kind: "expense", categoryId: "savings", goalId: goal.id, amount: amt, note: `Пополнение: ${goal.name}`, date: todayStr() }, ...state.transactions];
@@ -254,9 +327,9 @@ function addSavingsDeposit() {
 
 function saveGoal() {
   const name = state.goalDraft.name.trim();
-  const target = Number(state.goalDraft.target);
+  const target = parseAmount(state.goalDraft.target);
   const rawBase = String(state.goalDraft.base).trim();
-  const base = rawBase === "" ? 0 : Number(rawBase);
+  const base = rawBase === "" ? 0 : parseAmount(rawBase);
   if (!name) { state.error = "Введите название копилки."; render(); return; }
   if (!Number.isFinite(target) || target <= 0) { state.error = "Цель должна быть числом больше нуля."; render(); return; }
   if (!Number.isFinite(base) || base < 0) { state.error = "«Уже накоплено» должно быть числом."; render(); return; }
@@ -372,6 +445,19 @@ function importData(file) {
     try {
       const data = JSON.parse(reader.result);
       if (!data || !Array.isArray(data.transactions)) throw new Error("bad format");
+      // восстановление заменяет всё целиком — если на телефоне уже что-то есть, спрашиваем
+      const have = state.transactions.length, inFile = data.transactions.length;
+      if (have > 0) {
+        const when = data.exportedAt ? new Date(data.exportedAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : "";
+        const word = (n) => `${n} ${plural(n, ["запись", "записи", "записей"])}`;
+        const ok = window.confirm(
+          `Заменить данные на телефоне данными из файла?\n\n` +
+          `Сейчас на телефоне: ${word(have)}.\n` +
+          `В файле${when ? ` (сохранён ${when})` : ""}: ${word(inFile)}.\n\n` +
+          `Текущие записи будут заменены.`
+        );
+        if (!ok) { state.error = null; state.notice = "Восстановление отменено, ваши данные не тронуты."; render(); return; }
+      }
       state.transactions = data.transactions;
       if (Array.isArray(data.categories) && data.categories.length) state.categories = data.categories;
       if (Array.isArray(data.goals) && data.goals.length) {
@@ -397,7 +483,7 @@ function importData(file) {
 
 // ---------- элементы ----------
 function amountSpan(value, color, sizeClass) {
-  return `<span class="kfin-mono ${sizeClass}" style="color:${color}" data-amount="${value}">${fmt(value)}</span>`;
+  return `<span class="kfin-mono ${sizeClass}" style="color:${color};white-space:nowrap" data-amount="${value}">${fmt(value)}</span>`;
 }
 
 function donutChart(rows, total) {
@@ -444,7 +530,7 @@ function txRow(t, opts) {
       </div>
     </div>
     <div class="flex items-center gap-1 flex-shrink-0">
-      <span class="kfin-mono text-sm" style="color:${t.kind === "income" ? BLUE : BURGUNDY}">${t.kind === "income" ? "+" : "−"}${fmt(t.amount)}</span>
+      <span class="kfin-mono text-sm" style="color:${t.kind === "income" ? BLUE : (isSaved(t) ? ROSE : BURGUNDY)};white-space:nowrap">${t.kind === "income" ? "+" : "−"}${fmt(t.amount)}</span>
       <button class="tap" data-action="edit-tx" data-id="${t.id}" style="color:var(--ink-dim)" aria-label="Изменить">${ICONS.pen}</button>
       <button class="tap" data-action="delete-tx" data-id="${t.id}" style="color:var(--ink-dim)" aria-label="Удалить">${ICONS.x}</button>
     </div>
@@ -471,31 +557,46 @@ function txHistory(kindFilter) {
 
 // ---------- экраны ----------
 function renderOverview() {
-  const { totalIncome, totalExpense, balance } = totals();
-  const { cur, curT, prevT } = monthCompare();
-  const rows = categoryBreakdown(cur);
-  const diff = curT.totalExpense - prevT.totalExpense;
+  const all = totals();
+  const range = periodAt(state.periodMode, state.periodOffset);
+  const prevRange = periodAt(state.periodMode, state.periodOffset - 1);
+  const cur = totals(state.transactions.filter((t) => inRange(t, range)));
+  const prev = totals(state.transactions.filter((t) => inRange(t, prevRange)));
+  const rows = categoryBreakdown(range);
+  const diff = cur.totalExpense - prev.totalExpense;
+  const { min, max } = periodBounds();
+  const canPrev = state.periodOffset > min, canNext = state.periodOffset < max;
+  const arrowStyle = (on) => `color:var(--ink-dim);opacity:${on ? 1 : 0.25}`;
   const savings = savingsTotal();
 
   return `<div class="kfin-panel">
     <section class="rounded-2xl mb-5 overflow-hidden card">
-      <div class="grid grid-cols-3 text-center">
-        <div class="py-4 border-r"><div class="text-[10px] uppercase tracking-wide mb-1" style="color:var(--ink-dim)">Приход</div>${amountSpan(totalIncome, BLUE, "text-base")}</div>
-        <div class="py-4 border-r"><div class="text-[10px] uppercase tracking-wide mb-1" style="color:var(--ink-dim)">Расход</div>${amountSpan(totalExpense, BURGUNDY, "text-base")}</div>
-        <div class="py-4"><div class="text-[10px] uppercase tracking-wide mb-1" style="color:var(--ink-dim)">Остаток</div>${amountSpan(balance, balance >= 0 ? SAGE : BURGUNDY, "text-base")}</div>
+      <div class="text-[10px] uppercase tracking-wide px-4 py-2" style="color:var(--ink-dim)">За всё время</div>
+      <div class="grid grid-cols-2 text-center">
+        <div class="py-3 border-r" style="border-bottom:1px solid var(--line)"><div class="text-[10px] uppercase tracking-wide mb-1" style="color:var(--ink-dim)">Приход</div>${amountSpan(all.totalIncome, BLUE, "text-base")}</div>
+        <div class="py-3" style="border-bottom:1px solid var(--line)"><div class="text-[10px] uppercase tracking-wide mb-1" style="color:var(--ink-dim)">Расход</div>${amountSpan(all.totalExpense, BURGUNDY, "text-base")}</div>
+        <div class="py-3 border-r"><div class="text-[10px] uppercase tracking-wide mb-1" style="color:var(--ink-dim)">Отложено</div>${amountSpan(all.totalSaved, ROSE, "text-base")}</div>
+        <div class="py-3"><div class="text-[10px] uppercase tracking-wide mb-1" style="color:var(--ink-dim)">Остаток</div>${amountSpan(all.balance, all.balance >= 0 ? SAGE : BURGUNDY, "text-base")}</div>
       </div>
     </section>
 
-    <section class="rounded-2xl mb-5 p-4 card">
-      <div class="flex items-baseline justify-between mb-3">
-        <span class="text-xs uppercase tracking-wide" style="color:var(--ink-dim)">${esc(monthLabel(cur))}</span>
-        ${prevT.totalExpense > 0 ? `<span class="kfin-mono text-xs" style="color:${diff > 0 ? BURGUNDY : BLUE}">${diff > 0 ? "+" : "−"}${esc(fmt(Math.abs(diff)))} к прошлому</span>` : ""}
+    <section class="rounded-2xl mb-5 p-4 card ${state.periodSlide}" data-swipe="period">
+      <div class="seg mb-3">
+        <button data-action="period-mode" data-mode="month" class="${state.periodMode === "month" ? "active" : ""}">Месяц</button>
+        <button data-action="period-mode" data-mode="week" class="${state.periodMode === "week" ? "active" : ""}">Неделя</button>
       </div>
-      <div class="grid grid-cols-2 gap-3 mb-3">
-        <div><div class="text-[10px] uppercase mb-1" style="color:var(--ink-dim)">Пришло</div>${amountSpan(curT.totalIncome, BLUE, "text-lg")}</div>
-        <div><div class="text-[10px] uppercase mb-1" style="color:var(--ink-dim)">Потрачено</div>${amountSpan(curT.totalExpense, BURGUNDY, "text-lg")}</div>
+      <div class="flex items-center justify-between mb-1">
+        <button data-action="period-prev" class="tap" style="${arrowStyle(canPrev)}" ${canPrev ? "" : "disabled"} aria-label="Раньше">${ICONS.chevronL}</button>
+        <span class="text-base font-medium" style="color:var(--ink)">${esc(range.label)}</span>
+        <button data-action="period-next" class="tap" style="${arrowStyle(canNext)}" ${canNext ? "" : "disabled"} aria-label="Позже">${ICONS.chevron}</button>
       </div>
-      ${rows.length ? donutChart(rows, curT.totalExpense) : `<div class="text-sm py-4 text-center" style="color:var(--ink-dim)">В этом месяце трат ещё нет</div>`}
+      <div class="text-xs text-center mb-4 kfin-mono" style="min-height:16px;color:${diff > 0 ? BURGUNDY : BLUE}">${prev.totalExpense > 0 ? `${diff > 0 ? "+" : "−"}${esc(fmt(Math.abs(diff)))} к ${state.periodMode === "week" ? "прошлой неделе" : "прошлому месяцу"}` : ""}</div>
+      <div class="space-y-2 mb-4">
+        <div class="flex items-baseline justify-between"><span class="text-xs uppercase tracking-wide" style="color:var(--ink-dim)">Пришло</span>${amountSpan(cur.totalIncome, BLUE, "text-lg")}</div>
+        <div class="flex items-baseline justify-between"><span class="text-xs uppercase tracking-wide" style="color:var(--ink-dim)">Потрачено</span>${amountSpan(cur.totalExpense, BURGUNDY, "text-lg")}</div>
+        <div class="flex items-baseline justify-between"><span class="text-xs uppercase tracking-wide" style="color:var(--ink-dim)">Отложено</span>${amountSpan(cur.totalSaved, ROSE, "text-lg")}</div>
+      </div>
+      ${rows.length ? donutChart(rows, cur.totalExpense) : `<div class="text-sm py-4 text-center" style="color:var(--ink-dim)">За этот период трат нет</div>`}
     </section>
 
     <button data-action="goto" data-tab="savings" class="w-full text-left rounded-2xl mb-5 p-4 card">
@@ -557,8 +658,8 @@ function renderOverview() {
 function formBlock(kind) {
   const editing = !!state.editingId;
   const chosen = state.form.kind === kind ? state.categories.find((c) => c.id === state.form.categoryId) : null;
-  // при правке старой траты её убранная категория остаётся в списке, иначе она бы «подменилась»
-  const cats = state.categories.filter((c) => c.type === kind && (!c.archived || (editing && chosen && chosen.id === c.id)));
+  // при правке старой записи её скрытая категория остаётся в списке, иначе она бы «подменилась»
+  const cats = state.categories.filter((c) => c.type === kind && (!hiddenCat(c) || (editing && chosen && chosen.id === c.id)));
   const selId = chosen && cats.some((c) => c.id === chosen.id) ? chosen.id : (cats[0] && cats[0].id);
   return `<section class="rounded-2xl mb-5 p-4 card">
     <div class="flex items-center justify-between mb-3">
@@ -590,7 +691,7 @@ function renderIncome() {
 
 function renderExpenses() {
   const { totalExpense } = totals();
-  const cats = state.categories.filter((c) => c.type === "expense" && !c.archived);
+  const cats = state.categories.filter((c) => c.type === "expense" && !hiddenCat(c));
   const archivedCats = state.categories.filter((c) => c.type === "expense" && c.archived);
   const rows = categoryBreakdown(null);
   return `<div class="kfin-panel">
@@ -751,6 +852,7 @@ function render() {
     </nav>
   `;
   state.slide = "";
+  state.periodSlide = "";
   animateAmounts(root);
 }
 
@@ -767,7 +869,8 @@ function animateAmounts(root) {
     function tick(now) {
       const p = Math.min(1, (now - start) / duration);
       const eased = 1 - Math.pow(1 - p, 3);
-      el.textContent = fmt(from + (target - from) * eased);
+      // по пути показываем целые рубли, в конце — точную сумму с копейками
+      el.textContent = p < 1 ? fmtRound(from + (target - from) * eased) : fmt(target);
       if (p < 1) requestAnimationFrame(tick);
     }
     requestAnimationFrame(tick);
@@ -791,6 +894,22 @@ function shiftTab(dir) {
   goTab(TABS[next].id);
 }
 
+// ---------- переключение периода на «Обзоре» ----------
+function setPeriodMode(mode) {
+  if (mode === state.periodMode) return;
+  state.periodMode = mode;
+  state.periodOffset = 0;
+  render();
+}
+function shiftPeriod(dir) {
+  const { min, max } = periodBounds();
+  const next = state.periodOffset + dir;
+  if (next < min || next > max) return;
+  state.periodOffset = next;
+  state.periodSlide = dir > 0 ? "slide-left" : "slide-right";
+  render();
+}
+
 // ---------- события ----------
 document.addEventListener("DOMContentLoaded", () => {
   const app = document.getElementById("app");
@@ -808,6 +927,9 @@ document.addEventListener("DOMContentLoaded", () => {
     else if (a === "cancel-edit") cancelEdit();
     else if (a === "delete-tx") deleteTransaction(el.dataset.id);
     else if (a === "add-savings") addSavingsDeposit();
+    else if (a === "period-mode") setPeriodMode(el.dataset.mode);
+    else if (a === "period-prev") shiftPeriod(-1);
+    else if (a === "period-next") shiftPeriod(1);
     else if (a === "export") exportData();
     else if (a === "show-add-category") { state.addingCategory = true; state.newCatColor = freeColors()[0]; render(); }
     else if (a === "cancel-add-category") { state.addingCategory = false; render(); }
@@ -858,18 +980,23 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // свайп между вкладками
-  let sx = 0, sy = 0, tracking = false;
+  // свайп: внутри блока периода листает периоды, в остальных местах — вкладки
+  let sx = 0, sy = 0, tracking = false, swipeArea = null;
   app.addEventListener("touchstart", (e) => {
     if (e.touches.length !== 1) { tracking = false; return; }
     sx = e.touches[0].clientX; sy = e.touches[0].clientY; tracking = true;
+    const zone = e.target.closest ? e.target.closest("[data-swipe]") : null;
+    swipeArea = zone ? zone.dataset.swipe : null;
   }, { passive: true });
   app.addEventListener("touchend", (e) => {
     if (!tracking) return;
     tracking = false;
     const t = e.changedTouches[0];
     const dx = t.clientX - sx, dy = t.clientY - sy;
-    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.8) shiftTab(dx < 0 ? 1 : -1);
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.8) {
+      if (swipeArea === "period") shiftPeriod(dx < 0 ? 1 : -1);
+      else shiftTab(dx < 0 ? 1 : -1);
+    }
   }, { passive: true });
 
   render();
