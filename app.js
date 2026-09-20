@@ -7,7 +7,16 @@ const SAGE = "#5E8F79";        // остаток
 const ROSE = "#C2758F";        // копилки и акцент
 const GOLD = "#C79A4B";
 const LILAC = "#A98FC4", BLUSH = "#D98FA8", SKY = "#7FB3CC", CARAMEL = "#C9915E";
-const PALETTE = [ROSE, BURGUNDY, BLUE, SAGE, CARAMEL, LILAC, BLUSH, SKY];
+// первые 8 — прежние цвета, дальше добавлены заметно разные оттенки,
+// чтобы новые категории не сливались с уже занятыми
+const PALETTE = [
+  ROSE, BURGUNDY, BLUE, SAGE, CARAMEL, LILAC, BLUSH, SKY,
+  "#D9705F", "#C9A62E", "#3F8F8F", "#7A4B7A", "#8A9A4B", "#3E5C8A", "#4F6F52",
+  "#9C8577", "#6B7A8C", "#BF4FA0", "#7C8FD0", "#7B5544", "#55504D",
+];
+
+// эти категории убрать нельзя: на «Копилке» держатся накопления, «Прочее» — запасная
+const LOCKED_CATEGORIES = ["savings", "other"];
 
 const DEFAULT_CATEGORIES = [
   { id: "salary", label: "Зарплата", type: "income", color: BLUE, builtin: true },
@@ -180,7 +189,7 @@ const TABS = [
 
 // ---------- действия ----------
 function resetForm(kind) {
-  const cat = state.categories.find((c) => c.type === kind);
+  const cat = state.categories.find((c) => c.type === kind && !c.archived);
   state.form = { kind, categoryId: cat ? cat.id : "other", amount: "", note: "", date: todayStr() };
   state.editingId = null;
 }
@@ -190,7 +199,10 @@ function submitTransaction(kind) {
   if (!amt || amt <= 0) { state.error = "Укажите сумму больше нуля."; render(); return; }
   state.error = null;
   let cat = catById(state.form.categoryId);
-  if (!cat || cat.type !== kind) cat = state.categories.find((c) => c.type === kind) || cat;
+  // убранная категория подходит только при правке старой записи, в новую трату — нет
+  if (!cat || cat.type !== kind || (cat.archived && !state.editingId)) {
+    cat = state.categories.find((c) => c.type === kind && !c.archived) || cat;
+  }
 
   if (state.editingId) {
     state.transactions = state.transactions.map((t) => t.id === state.editingId
@@ -272,13 +284,26 @@ function deleteGoal(id) {
   render();
 }
 
+// цвета, которых нет ни у одной категории (в том числе убранных — их траты остаются на диаграмме)
+function freeColors() {
+  const used = new Set(state.categories.map((c) => c.color));
+  const free = PALETTE.filter((c) => !used.has(c));
+  return free.length ? free : PALETTE;
+}
+
 function addCategory() {
   const name = state.newCatName.trim();
   if (!name) { state.error = "Введите название категории."; render(); return; }
-  if (state.categories.some((c) => c.type === "expense" && c.label.toLowerCase() === name.toLowerCase())) {
-    state.error = "Такая категория уже есть."; render(); return;
-  }
+  const dup = state.categories.find((c) => c.type === "expense" && c.label.toLowerCase() === name.toLowerCase());
+  if (dup && !dup.archived) { state.error = "Такая категория уже есть."; render(); return; }
   state.error = null;
+  if (dup) {
+    // такая категория была убрана — возвращаем её со старыми записями
+    state.newCatName = "";
+    state.addingCategory = false;
+    restoreCategory(dup.id);
+    return;
+  }
   const cat = { id: slug(name), label: name, type: "expense", color: state.newCatColor, builtin: false };
   state.categories = [...state.categories, cat];
   persistCategories();
@@ -288,16 +313,31 @@ function addCategory() {
   render();
 }
 
-function deleteCategory(id) {
-  if (state.transactions.some((t) => t.categoryId === id)) {
-    state.error = "Нельзя удалить категорию, по которой уже есть записи."; render(); return;
-  }
+function removeCategory(id) {
+  const cat = state.categories.find((c) => c.id === id);
+  if (!cat || LOCKED_CATEGORIES.includes(id)) return;
   state.error = null;
-  state.categories = state.categories.filter((c) => c.id !== id);
-  if (state.form.categoryId === id) {
-    const fb = state.categories.find((c) => c.type === state.form.kind);
+  if (state.transactions.some((t) => t.categoryId === id)) {
+    // по категории есть записи — прячем из списков, но не удаляем, чтобы итоги и журнал не менялись
+    state.categories = state.categories.map((c) => c.id === id ? { ...c, archived: true } : c);
+    state.notice = `Категория «${cat.label}» убрана. Записи по ней остались в журнале.`;
+  } else {
+    state.categories = state.categories.filter((c) => c.id !== id);
+    state.notice = `Категория «${cat.label}» удалена.`;
+  }
+  if (state.form.categoryId === id && !state.editingId) {
+    const fb = state.categories.find((c) => c.type === cat.type && !c.archived);
     if (fb) state.form.categoryId = fb.id;
   }
+  persistCategories();
+  render();
+}
+
+function restoreCategory(id) {
+  const cat = state.categories.find((c) => c.id === id);
+  if (!cat) return;
+  state.categories = state.categories.map((c) => c.id === id ? { ...c, archived: false } : c);
+  state.notice = `Категория «${cat.label}» снова в списке.`;
   persistCategories();
   render();
 }
@@ -515,9 +555,11 @@ function renderOverview() {
 }
 
 function formBlock(kind) {
-  const cats = state.categories.filter((c) => c.type === kind);
   const editing = !!state.editingId;
-  const selId = state.form.kind === kind ? state.form.categoryId : (cats[0] && cats[0].id);
+  const chosen = state.form.kind === kind ? state.categories.find((c) => c.id === state.form.categoryId) : null;
+  // при правке старой траты её убранная категория остаётся в списке, иначе она бы «подменилась»
+  const cats = state.categories.filter((c) => c.type === kind && (!c.archived || (editing && chosen && chosen.id === c.id)));
+  const selId = chosen && cats.some((c) => c.id === chosen.id) ? chosen.id : (cats[0] && cats[0].id);
   return `<section class="rounded-2xl mb-5 p-4 card">
     <div class="flex items-center justify-between mb-3">
       <span class="text-xs uppercase tracking-wide" style="color:var(--ink-dim)">${editing ? "Изменение записи" : (kind === "income" ? "Новый приход" : "Новая трата")}</span>
@@ -548,7 +590,8 @@ function renderIncome() {
 
 function renderExpenses() {
   const { totalExpense } = totals();
-  const cats = state.categories.filter((c) => c.type === "expense");
+  const cats = state.categories.filter((c) => c.type === "expense" && !c.archived);
+  const archivedCats = state.categories.filter((c) => c.type === "expense" && c.archived);
   const rows = categoryBreakdown(null);
   return `<div class="kfin-panel">
     <section class="rounded-2xl mb-5 p-4 card">
@@ -566,7 +609,7 @@ function renderExpenses() {
       <div class="rounded-xl p-3 mb-3" style="background:var(--bg-card);border:1px dashed var(--line)">
         <input data-bind="newCatName" value="${esc(state.newCatName)}" placeholder="Название категории" class="w-full px-3 rounded-lg mb-2" style="background:var(--bg);color:var(--ink);border:1px solid var(--line)" />
         <div class="flex gap-1.5 mb-3 flex-wrap">
-          ${PALETTE.map((c) => `<button data-action="pick-color" data-color="${c}" class="w-7 h-7 rounded-full flex-shrink-0" style="background:${c};outline:${state.newCatColor === c ? "2px solid var(--ink)" : "none"};outline-offset:2px" aria-label="цвет"></button>`).join("")}
+          ${freeColors().map((c) => `<button data-action="pick-color" data-color="${c}" class="w-7 h-7 rounded-full flex-shrink-0" style="background:${c};outline:${state.newCatColor === c ? "2px solid var(--ink)" : "none"};outline-offset:2px" aria-label="цвет"></button>`).join("")}
         </div>
         <div class="flex gap-2">
           <button data-action="save-category" class="btn btn-mint flex-1">Сохранить</button>
@@ -576,9 +619,18 @@ function renderExpenses() {
       <div class="flex flex-wrap gap-2">
         ${cats.map((c) => `<div class="text-xs flex items-center gap-1.5 px-2.5 py-1.5 rounded-full card" style="color:var(--ink)">
           <span class="w-2 h-2 rounded-full" style="background:${c.color}"></span>${esc(c.label)}
-          ${!c.builtin ? `<button data-action="delete-category" data-id="${c.id}" style="color:var(--ink-dim)" aria-label="удалить">${ICONS.x}</button>` : ""}
+          ${!LOCKED_CATEGORIES.includes(c.id) ? `<button data-action="remove-category" data-id="${c.id}" style="color:var(--ink-dim);padding:6px;margin:-6px -6px -6px 0" aria-label="убрать">${ICONS.x}</button>` : ""}
         </div>`).join("")}
       </div>
+      ${archivedCats.length ? `<div class="mt-3">
+        <div class="text-xs mb-2" style="color:var(--ink-dim)">Убранные — записи по ним сохранены</div>
+        <div class="flex flex-wrap gap-2">
+          ${archivedCats.map((c) => `<div class="text-xs flex items-center gap-1.5 px-2.5 py-1.5 rounded-full" style="border:1px dashed var(--line);color:var(--ink-dim)">
+            <span class="w-2 h-2 rounded-full" style="background:${c.color}"></span>${esc(c.label)}
+            <button data-action="restore-category" data-id="${c.id}" class="underline" style="color:var(--ink-dim)">вернуть</button>
+          </div>`).join("")}
+        </div>
+      </div>` : ""}
     </section>
 
     ${rows.length ? `<section class="rounded-2xl mb-5 p-4 card">
@@ -757,11 +809,12 @@ document.addEventListener("DOMContentLoaded", () => {
     else if (a === "delete-tx") deleteTransaction(el.dataset.id);
     else if (a === "add-savings") addSavingsDeposit();
     else if (a === "export") exportData();
-    else if (a === "show-add-category") { state.addingCategory = true; render(); }
+    else if (a === "show-add-category") { state.addingCategory = true; state.newCatColor = freeColors()[0]; render(); }
     else if (a === "cancel-add-category") { state.addingCategory = false; render(); }
     else if (a === "pick-color") { state.newCatColor = el.dataset.color; render(); }
     else if (a === "save-category") addCategory();
-    else if (a === "delete-category") deleteCategory(el.dataset.id);
+    else if (a === "remove-category") removeCategory(el.dataset.id);
+    else if (a === "restore-category") restoreCategory(el.dataset.id);
     else if (a === "show-add-goal") { state.addingGoal = true; state.editingGoalId = null; state.goalDraft = { name: "", target: "", base: "" }; render(); }
     else if (a === "cancel-goal") { state.addingGoal = false; state.editingGoalId = null; state.goalDraft = { name: "", target: "", base: "" }; render(); }
     else if (a === "save-goal") saveGoal();
